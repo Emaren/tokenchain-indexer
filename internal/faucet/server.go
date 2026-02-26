@@ -172,7 +172,7 @@ func (s *Server) sendTokens(ctx context.Context, to string) (string, error) {
 		"--chain-id", s.cfg.ChainID,
 		"--node", s.cfg.NodeRPC,
 		"--yes",
-		"--broadcast-mode", "block",
+		"--broadcast-mode", "sync",
 		"--fees", s.cfg.Fees,
 		"--output", "json",
 	)
