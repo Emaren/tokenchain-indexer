@@ -23,6 +23,7 @@ Environment variables:
 - `CHAIN_ID` (default `tokenchain-testnet-1`)
 - `NETWORK` (default `testnet`)
 - `RPC_ADDR` (default `http://127.0.0.1:26657`)
+- `REST_ADDR` (default `http://127.0.0.1:1317`)
 
 Faucet environment variables:
 - `FAUCET_ENABLED` (default `true`)
@@ -36,6 +37,7 @@ Faucet environment variables:
 - `GET /healthz`
 - `GET /v1/network`
 - `GET /v1/status`
+- `GET /v1/loyalty/merchant-routing?limit=25&verified_only=true`
 - `GET /v1/endpoints`
 - `GET /v1/version`
 
