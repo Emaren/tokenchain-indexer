@@ -6,6 +6,7 @@ type Config struct {
 	ListenAddr string
 	ChainID    string
 	Network    string
+	RPCAddr    string
 }
 
 func FromEnv() Config {
@@ -13,6 +14,7 @@ func FromEnv() Config {
 		ListenAddr: getenv("LISTEN_ADDR", ":3321"),
 		ChainID:    getenv("CHAIN_ID", "tokenchain-testnet-1"),
 		Network:    getenv("NETWORK", "testnet"),
+		RPCAddr:    getenv("RPC_ADDR", "http://127.0.0.1:26657"),
 	}
 }
 

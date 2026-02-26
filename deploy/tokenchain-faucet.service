@@ -1,0 +1,35 @@
+[Unit]
+Description=TokenChain Faucet API
+After=network-online.target tokenchaind-testnet.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tokenchain
+Group=tokenchain
+WorkingDirectory=/var/lib/tokenchain-testnet
+ExecStart=/usr/local/bin/tokenchain-faucet
+Restart=always
+RestartSec=2
+Environment=LISTEN_ADDR=127.0.0.1:3322
+Environment=FAUCET_ENABLED=true
+Environment=CHAIN_ID=tokenchain-testnet-1
+Environment=NODE_RPC=http://127.0.0.1:26657
+Environment=CHAIN_HOME=/var/lib/tokenchain-testnet
+Environment=KEYRING_BACKEND=test
+Environment=FROM_KEY=treasury
+Environment=BECH32_PREFIX=tokenchain
+Environment=DENOM=utoken
+Environment=DISPENSE_AMOUNT=1000000
+Environment=TX_FEES=500utoken
+Environment=ADDRESS_COOLDOWN_MINUTES=1440
+Environment=IP_COOLDOWN_MINUTES=30
+Environment=MAX_REQUESTS_PER_DAY=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/tokenchain-testnet
+
+[Install]
+WantedBy=multi-user.target
