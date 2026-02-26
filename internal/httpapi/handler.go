@@ -915,7 +915,7 @@ func (h *Handler) adminRunDailyAllocation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if !req.AllowOverwrite {
+	if !req.AllowOverwrite && !req.DryRun {
 		for _, item := range computed {
 			exists, err := h.merchantAllocationExists(r.Context(), date, item.Denom)
 			if err != nil {
