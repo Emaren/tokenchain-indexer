@@ -48,8 +48,23 @@ Faucet environment variables:
 - `GET /v1/loyalty/merchant-allocations?limit=25&date=YYYY-MM-DD&denom=factory/...`
 - `POST /v1/admin/loyalty/merchant-routing` (Bearer token auth; disabled unless `ADMIN_API_TOKEN` set)
 - `POST /v1/admin/loyalty/merchant-allocation` (Bearer token auth; disabled unless `ADMIN_API_TOKEN` set)
+- `POST /v1/admin/loyalty/daily-allocation/run` (Bearer token auth; runs deterministic multi-denom allocation batch)
 - `GET /v1/endpoints`
 - `GET /v1/version`
+
+Daily allocation runner request body:
+```json
+{
+  "date": "2026-02-26",
+  "total_bucket_c_amount": 20000,
+  "allow_overwrite": false,
+  "dry_run": false,
+  "items": [
+    { "denom": "factory/tokenchain1.../wheat", "activity_score": 80 },
+    { "denom": "factory/tokenchain1.../stone", "activity_score": 20 }
+  ]
+}
+```
 
 Faucet endpoints:
 - `GET /healthz`

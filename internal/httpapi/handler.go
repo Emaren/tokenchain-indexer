@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os/exec"
@@ -34,6 +35,7 @@ func NewHandler(cfg config.Config) http.Handler {
 	mux.HandleFunc("/v1/loyalty/merchant-allocations", h.merchantAllocations)
 	mux.HandleFunc("/v1/admin/loyalty/merchant-routing", h.adminSetMerchantRouting)
 	mux.HandleFunc("/v1/admin/loyalty/merchant-allocation", h.adminRecordMerchantAllocation)
+	mux.HandleFunc("/v1/admin/loyalty/daily-allocation/run", h.adminRunDailyAllocation)
 	mux.HandleFunc("/v1/version", h.ver)
 	return mux
 }
@@ -137,6 +139,7 @@ func (h *Handler) endpoints(w http.ResponseWriter, _ *http.Request) {
 			"merchant_allocations":      "/v1/loyalty/merchant-allocations",
 			"admin_merchant_routing":    "/v1/admin/loyalty/merchant-routing",
 			"admin_merchant_allocation": "/v1/admin/loyalty/merchant-allocation",
+			"admin_daily_allocation":    "/v1/admin/loyalty/daily-allocation/run",
 			"version":                   "/v1/version",
 			"faucet":                    "see tokenchain-faucet service",
 			"openapi":                   "n/a",
@@ -406,6 +409,14 @@ func (h *Handler) fetchMerchantAllocations(limit int, date, denom string) ([]mer
 	return items, nil
 }
 
+func (h *Handler) merchantAllocationExists(_ context.Context, date, denom string) (bool, error) {
+	items, err := h.fetchMerchantAllocations(1, date, denom)
+	if err != nil {
+		return false, err
+	}
+	return len(items) > 0, nil
+}
+
 func toMerchantRoutingItem(t chainVerifiedToken) merchantRoutingItem {
 	stakers := parseBPS(t.MerchantIncentiveStakersBps)
 	treasury := parseBPS(t.MerchantIncentiveTreasuryBps)
@@ -487,6 +498,99 @@ func parseLimit(raw string, fallback, max int) int {
 	return n
 }
 
+func normalizeRunDate(raw string) (string, error) {
+	date := strings.TrimSpace(raw)
+	if date == "" {
+		location, err := time.LoadLocation("America/Edmonton")
+		if err != nil {
+			return time.Now().UTC().Format("2006-01-02"), nil
+		}
+		return time.Now().In(location).Format("2006-01-02"), nil
+	}
+	if _, err := time.Parse("2006-01-02", date); err != nil {
+		return "", err
+	}
+	return date, nil
+}
+
+func computeDailyAllocations(totalBucketCAmount uint64, rawItems []adminDailyAllocationScoreItem) ([]computedDailyAllocationItem, error) {
+	if len(rawItems) == 0 {
+		return nil, errors.New("items must not be empty")
+	}
+
+	items := make([]adminDailyAllocationScoreItem, 0, len(rawItems))
+	seen := make(map[string]struct{}, len(rawItems))
+	var totalScore uint64
+	for _, raw := range rawItems {
+		denom := strings.TrimSpace(raw.Denom)
+		if denom == "" {
+			return nil, errors.New("each item requires denom")
+		}
+		if raw.ActivityScore == 0 {
+			return nil, fmt.Errorf("activity_score must be greater than zero for %s", denom)
+		}
+		if _, ok := seen[denom]; ok {
+			return nil, fmt.Errorf("duplicate denom %s", denom)
+		}
+		seen[denom] = struct{}{}
+		if totalScore > ^uint64(0)-raw.ActivityScore {
+			return nil, errors.New("total activity score overflow")
+		}
+		totalScore += raw.ActivityScore
+		items = append(items, adminDailyAllocationScoreItem{
+			Denom:         denom,
+			ActivityScore: raw.ActivityScore,
+		})
+	}
+	if totalScore == 0 {
+		return nil, errors.New("total activity score must be greater than zero")
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Denom < items[j].Denom
+	})
+
+	computed := make([]computedDailyAllocationItem, 0, len(items))
+	var distributed uint64
+	for _, item := range items {
+		amt, err := mulDiv(totalBucketCAmount, item.ActivityScore, totalScore)
+		if err != nil {
+			return nil, err
+		}
+		if distributed > ^uint64(0)-amt {
+			return nil, errors.New("distributed amount overflow")
+		}
+		distributed += amt
+		computed = append(computed, computedDailyAllocationItem{
+			Denom:         item.Denom,
+			ActivityScore: item.ActivityScore,
+			BucketCAmount: amt,
+		})
+	}
+
+	remainder := totalBucketCAmount - distributed
+	for i := uint64(0); i < remainder; i++ {
+		computed[i].BucketCAmount++
+	}
+
+	return computed, nil
+}
+
+func mulDiv(x, y, d uint64) (uint64, error) {
+	if d == 0 {
+		return 0, errors.New("division by zero")
+	}
+	xBig := new(big.Int).SetUint64(x)
+	yBig := new(big.Int).SetUint64(y)
+	dBig := new(big.Int).SetUint64(d)
+	out := new(big.Int).Mul(xBig, yBig)
+	out.Quo(out, dBig)
+	if !out.IsUint64() {
+		return 0, errors.New("allocation amount exceeds uint64")
+	}
+	return out.Uint64(), nil
+}
+
 type adminSetMerchantRoutingRequest struct {
 	Denom                        string `json:"denom"`
 	MerchantIncentiveStakersBps  uint64 `json:"merchant_incentive_stakers_bps"`
@@ -495,6 +599,25 @@ type adminSetMerchantRoutingRequest struct {
 
 type adminRecordMerchantAllocationRequest struct {
 	Date          string `json:"date"`
+	Denom         string `json:"denom"`
+	ActivityScore uint64 `json:"activity_score"`
+	BucketCAmount uint64 `json:"bucket_c_amount"`
+}
+
+type adminDailyAllocationScoreItem struct {
+	Denom         string `json:"denom"`
+	ActivityScore uint64 `json:"activity_score"`
+}
+
+type adminRunDailyAllocationRequest struct {
+	Date               string                          `json:"date"`
+	TotalBucketCAmount uint64                          `json:"total_bucket_c_amount"`
+	Items              []adminDailyAllocationScoreItem `json:"items"`
+	AllowOverwrite     bool                            `json:"allow_overwrite"`
+	DryRun             bool                            `json:"dry_run"`
+}
+
+type computedDailyAllocationItem struct {
 	Denom         string `json:"denom"`
 	ActivityScore uint64 `json:"activity_score"`
 	BucketCAmount uint64 `json:"bucket_c_amount"`
@@ -656,6 +779,142 @@ func (h *Handler) adminRecordMerchantAllocation(w http.ResponseWriter, r *http.R
 		"denom":           req.Denom,
 		"activity_score":  req.ActivityScore,
 		"bucket_c_amount": req.BucketCAmount,
+	})
+}
+
+func (h *Handler) adminRunDailyAllocation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method_not_allowed"})
+		return
+	}
+	if strings.TrimSpace(h.cfg.AdminAPIToken) == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "admin_api_disabled"})
+		return
+	}
+	if !h.isAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
+		return
+	}
+
+	var req adminRunDailyAllocationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_json"})
+		return
+	}
+
+	date, err := normalizeRunDate(req.Date)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok":     false,
+			"error":  "invalid_date",
+			"detail": "date must be YYYY-MM-DD",
+		})
+		return
+	}
+	if req.TotalBucketCAmount == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "total_bucket_c_amount_required"})
+		return
+	}
+
+	computed, err := computeDailyAllocations(req.TotalBucketCAmount, req.Items)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok":     false,
+			"error":  "invalid_allocation_items",
+			"detail": err.Error(),
+		})
+		return
+	}
+
+	if !req.AllowOverwrite {
+		for _, item := range computed {
+			exists, err := h.merchantAllocationExists(r.Context(), date, item.Denom)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]any{
+					"ok":     false,
+					"error":  "allocation_existence_check_failed",
+					"detail": err.Error(),
+				})
+				return
+			}
+			if exists {
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"ok":    false,
+					"error": "allocation_already_exists",
+					"date":  date,
+					"denom": item.Denom,
+				})
+				return
+			}
+		}
+	}
+
+	if req.DryRun {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":                    true,
+			"dry_run":               true,
+			"date":                  date,
+			"total_bucket_c_amount": req.TotalBucketCAmount,
+			"item_count":            len(computed),
+			"items":                 computed,
+		})
+		return
+	}
+
+	submitted := make([]map[string]any, 0, len(computed))
+	for _, item := range computed {
+		txResp, err := h.submitMerchantAllocationTx(r.Context(), adminRecordMerchantAllocationRequest{
+			Date:          date,
+			Denom:         item.Denom,
+			ActivityScore: item.ActivityScore,
+			BucketCAmount: item.BucketCAmount,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{
+				"ok":              false,
+				"error":           "tx_submission_failed",
+				"detail":          err.Error(),
+				"submitted_count": len(submitted),
+				"submitted":       submitted,
+			})
+			return
+		}
+		if txResp.Code != 0 {
+			detail := strings.TrimSpace(txResp.RawLog)
+			if detail == "" {
+				detail = "chain rejected transaction"
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"ok":              false,
+				"error":           "tx_rejected",
+				"code":            txResp.Code,
+				"codespace":       txResp.CodeSpa,
+				"tx_hash":         txResp.TxHash,
+				"detail":          detail,
+				"submitted_count": len(submitted),
+				"submitted":       submitted,
+			})
+			return
+		}
+
+		submitted = append(submitted, map[string]any{
+			"tx_hash":         txResp.TxHash,
+			"height":          txResp.Height,
+			"denom":           item.Denom,
+			"activity_score":  item.ActivityScore,
+			"bucket_c_amount": item.BucketCAmount,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                    true,
+		"dry_run":               false,
+		"date":                  date,
+		"total_bucket_c_amount": req.TotalBucketCAmount,
+		"item_count":            len(computed),
+		"items":                 computed,
+		"submitted_count":       len(submitted),
+		"submitted":             submitted,
 	})
 }
 
