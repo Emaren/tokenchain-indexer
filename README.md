@@ -57,6 +57,9 @@ Daily allocation runner request body:
 {
   "date": "2026-02-26",
   "total_bucket_c_amount": 20000,
+  "auto_from_verified_tokens": false,
+  "min_activity_score": 1,
+  "max_auto_tokens": 200,
   "allow_overwrite": false,
   "dry_run": false,
   "items": [
@@ -65,6 +68,11 @@ Daily allocation runner request body:
   ]
 }
 ```
+
+Auto mode:
+- set `auto_from_verified_tokens=true`
+- omit `items`
+- score source becomes each verified token's `minted_supply` with floor `min_activity_score` (default `1`)
 
 Faucet endpoints:
 - `GET /healthz`

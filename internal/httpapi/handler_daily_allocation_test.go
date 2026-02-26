@@ -61,3 +61,32 @@ func TestNormalizeRunDateRejectsInvalid(t *testing.T) {
 		t.Fatal("expected invalid date error")
 	}
 }
+
+func TestDeriveAutoScoreItems(t *testing.T) {
+	items, err := deriveAutoScoreItems([]merchantRoutingItem{
+		{Denom: "factory/a/token", MintedSupply: "0"},
+		{Denom: "factory/b/token", MintedSupply: "12"},
+		{Denom: "factory/a/token", MintedSupply: "99"},
+	}, 5)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 unique items, got %d", len(items))
+	}
+	if items[0].Denom != "factory/a/token" || items[0].ActivityScore != 5 {
+		t.Fatalf("unexpected first item: %+v", items[0])
+	}
+	if items[1].Denom != "factory/b/token" || items[1].ActivityScore != 12 {
+		t.Fatalf("unexpected second item: %+v", items[1])
+	}
+}
+
+func TestResolveAutoMaxTokens(t *testing.T) {
+	if got := resolveAutoMaxTokens(0); got != 200 {
+		t.Fatalf("expected default max 200, got %d", got)
+	}
+	if got := resolveAutoMaxTokens(800); got != 500 {
+		t.Fatalf("expected hard cap 500, got %d", got)
+	}
+}

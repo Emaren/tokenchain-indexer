@@ -513,6 +513,60 @@ func normalizeRunDate(raw string) (string, error) {
 	return date, nil
 }
 
+func resolveAutoMinScore(v uint64) uint64 {
+	if v == 0 {
+		return 1
+	}
+	return v
+}
+
+func resolveAutoMaxTokens(v uint64) int {
+	const (
+		defaultMax uint64 = 200
+		hardMax    uint64 = 500
+	)
+	if v == 0 {
+		return int(defaultMax)
+	}
+	if v > hardMax {
+		return int(hardMax)
+	}
+	return int(v)
+}
+
+func deriveAutoScoreItems(tokens []merchantRoutingItem, minScore uint64) ([]adminDailyAllocationScoreItem, error) {
+	if len(tokens) == 0 {
+		return nil, errors.New("no verified tokens available for auto scoring")
+	}
+
+	minScore = resolveAutoMinScore(minScore)
+	items := make([]adminDailyAllocationScoreItem, 0, len(tokens))
+	seen := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		denom := strings.TrimSpace(token.Denom)
+		if denom == "" {
+			continue
+		}
+		if _, ok := seen[denom]; ok {
+			continue
+		}
+		seen[denom] = struct{}{}
+
+		score := parseUint(token.MintedSupply)
+		if score < minScore {
+			score = minScore
+		}
+		items = append(items, adminDailyAllocationScoreItem{
+			Denom:         denom,
+			ActivityScore: score,
+		})
+	}
+	if len(items) == 0 {
+		return nil, errors.New("auto scoring yielded zero usable token items")
+	}
+	return items, nil
+}
+
 func computeDailyAllocations(totalBucketCAmount uint64, rawItems []adminDailyAllocationScoreItem) ([]computedDailyAllocationItem, error) {
 	if len(rawItems) == 0 {
 		return nil, errors.New("items must not be empty")
@@ -610,11 +664,14 @@ type adminDailyAllocationScoreItem struct {
 }
 
 type adminRunDailyAllocationRequest struct {
-	Date               string                          `json:"date"`
-	TotalBucketCAmount uint64                          `json:"total_bucket_c_amount"`
-	Items              []adminDailyAllocationScoreItem `json:"items"`
-	AllowOverwrite     bool                            `json:"allow_overwrite"`
-	DryRun             bool                            `json:"dry_run"`
+	Date                   string                          `json:"date"`
+	TotalBucketCAmount     uint64                          `json:"total_bucket_c_amount"`
+	Items                  []adminDailyAllocationScoreItem `json:"items"`
+	AllowOverwrite         bool                            `json:"allow_overwrite"`
+	DryRun                 bool                            `json:"dry_run"`
+	AutoFromVerifiedTokens bool                            `json:"auto_from_verified_tokens"`
+	MinActivityScore       uint64                          `json:"min_activity_score"`
+	MaxAutoTokens          uint64                          `json:"max_auto_tokens"`
 }
 
 type computedDailyAllocationItem struct {
@@ -816,7 +873,39 @@ func (h *Handler) adminRunDailyAllocation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	computed, err := computeDailyAllocations(req.TotalBucketCAmount, req.Items)
+	sourceItems := req.Items
+	allocationSource := "manual"
+	if req.AutoFromVerifiedTokens {
+		if len(req.Items) > 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"ok":     false,
+				"error":  "invalid_allocation_items",
+				"detail": "items must be empty when auto_from_verified_tokens=true",
+			})
+			return
+		}
+		tokens, err := h.fetchVerifiedTokens(resolveAutoMaxTokens(req.MaxAutoTokens), true)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{
+				"ok":     false,
+				"error":  "auto_token_fetch_failed",
+				"detail": err.Error(),
+			})
+			return
+		}
+		sourceItems, err = deriveAutoScoreItems(tokens, req.MinActivityScore)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"ok":     false,
+				"error":  "invalid_allocation_items",
+				"detail": err.Error(),
+			})
+			return
+		}
+		allocationSource = "auto_verified_tokens"
+	}
+
+	computed, err := computeDailyAllocations(req.TotalBucketCAmount, sourceItems)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"ok":     false,
@@ -851,12 +940,15 @@ func (h *Handler) adminRunDailyAllocation(w http.ResponseWriter, r *http.Request
 
 	if req.DryRun {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":                    true,
-			"dry_run":               true,
-			"date":                  date,
-			"total_bucket_c_amount": req.TotalBucketCAmount,
-			"item_count":            len(computed),
-			"items":                 computed,
+			"ok":                        true,
+			"dry_run":                   true,
+			"date":                      date,
+			"allocation_source":         allocationSource,
+			"auto_from_verified_tokens": req.AutoFromVerifiedTokens,
+			"min_activity_score":        resolveAutoMinScore(req.MinActivityScore),
+			"total_bucket_c_amount":     req.TotalBucketCAmount,
+			"item_count":                len(computed),
+			"items":                     computed,
 		})
 		return
 	}
@@ -907,14 +999,17 @@ func (h *Handler) adminRunDailyAllocation(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":                    true,
-		"dry_run":               false,
-		"date":                  date,
-		"total_bucket_c_amount": req.TotalBucketCAmount,
-		"item_count":            len(computed),
-		"items":                 computed,
-		"submitted_count":       len(submitted),
-		"submitted":             submitted,
+		"ok":                        true,
+		"dry_run":                   false,
+		"date":                      date,
+		"allocation_source":         allocationSource,
+		"auto_from_verified_tokens": req.AutoFromVerifiedTokens,
+		"min_activity_score":        resolveAutoMinScore(req.MinActivityScore),
+		"total_bucket_c_amount":     req.TotalBucketCAmount,
+		"item_count":                len(computed),
+		"items":                     computed,
+		"submitted_count":           len(submitted),
+		"submitted":                 submitted,
 	})
 }
 
