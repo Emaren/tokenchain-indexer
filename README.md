@@ -45,7 +45,9 @@ Faucet environment variables:
 - `GET /v1/network`
 - `GET /v1/status`
 - `GET /v1/loyalty/merchant-routing?limit=25&verified_only=true`
+- `GET /v1/loyalty/merchant-allocations?limit=25&date=YYYY-MM-DD&denom=factory/...`
 - `POST /v1/admin/loyalty/merchant-routing` (Bearer token auth; disabled unless `ADMIN_API_TOKEN` set)
+- `POST /v1/admin/loyalty/merchant-allocation` (Bearer token auth; disabled unless `ADMIN_API_TOKEN` set)
 - `GET /v1/endpoints`
 - `GET /v1/version`
 

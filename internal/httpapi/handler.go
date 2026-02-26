@@ -31,7 +31,9 @@ func NewHandler(cfg config.Config) http.Handler {
 	mux.HandleFunc("/v1/status", h.status)
 	mux.HandleFunc("/v1/endpoints", h.endpoints)
 	mux.HandleFunc("/v1/loyalty/merchant-routing", h.merchantRouting)
+	mux.HandleFunc("/v1/loyalty/merchant-allocations", h.merchantAllocations)
 	mux.HandleFunc("/v1/admin/loyalty/merchant-routing", h.adminSetMerchantRouting)
+	mux.HandleFunc("/v1/admin/loyalty/merchant-allocation", h.adminRecordMerchantAllocation)
 	mux.HandleFunc("/v1/version", h.ver)
 	return mux
 }
@@ -128,16 +130,18 @@ func (h *Handler) endpoints(w http.ResponseWriter, _ *http.Request) {
 		"network":  h.cfg.Network,
 		"rpc":      h.cfg.RPCAddr,
 		"api": map[string]string{
-			"healthz":                  "/healthz",
-			"network":                  "/v1/network",
-			"status":                   "/v1/status",
-			"merchant_routing":         "/v1/loyalty/merchant-routing",
-			"admin_merchant_routing":   "/v1/admin/loyalty/merchant-routing",
-			"version":                  "/v1/version",
-			"faucet":                   "see tokenchain-faucet service",
-			"openapi":                  "n/a",
-			"base_url":                 "",
-			"source_chain_rest_status": h.cfg.RESTAddr,
+			"healthz":                   "/healthz",
+			"network":                   "/v1/network",
+			"status":                    "/v1/status",
+			"merchant_routing":          "/v1/loyalty/merchant-routing",
+			"merchant_allocations":      "/v1/loyalty/merchant-allocations",
+			"admin_merchant_routing":    "/v1/admin/loyalty/merchant-routing",
+			"admin_merchant_allocation": "/v1/admin/loyalty/merchant-allocation",
+			"version":                   "/v1/version",
+			"faucet":                    "see tokenchain-faucet service",
+			"openapi":                   "n/a",
+			"base_url":                  "",
+			"source_chain_rest_status":  h.cfg.RESTAddr,
 		},
 	})
 }
@@ -173,6 +177,39 @@ type merchantRoutingItem struct {
 	MerchantIncentiveTreasuryPct string `json:"merchant_incentive_treasury_pct"`
 }
 
+type chainMerchantAllocation struct {
+	Key                          string `json:"key"`
+	Date                         string `json:"date"`
+	Denom                        string `json:"denom"`
+	ActivityScore                string `json:"activity_score"`
+	BucketCAmount                string `json:"bucket_c_amount"`
+	StakersAmount                string `json:"stakers_amount"`
+	TreasuryAmount               string `json:"treasury_amount"`
+	MerchantIncentiveStakersBps  string `json:"merchant_incentive_stakers_bps"`
+	MerchantIncentiveTreasuryBps string `json:"merchant_incentive_treasury_bps"`
+}
+
+type chainMerchantAllocationFilterResponse struct {
+	Merchantallocation []chainMerchantAllocation `json:"merchantallocation"`
+	Pagination         struct {
+		NextKey string `json:"next_key"`
+	} `json:"pagination"`
+}
+
+type merchantAllocationItem struct {
+	Key                          string `json:"key"`
+	Date                         string `json:"date"`
+	Denom                        string `json:"denom"`
+	ActivityScore                uint64 `json:"activity_score"`
+	BucketCAmount                uint64 `json:"bucket_c_amount"`
+	StakersAmount                uint64 `json:"stakers_amount"`
+	TreasuryAmount               uint64 `json:"treasury_amount"`
+	MerchantIncentiveStakersBps  uint64 `json:"merchant_incentive_stakers_bps"`
+	MerchantIncentiveTreasuryBps uint64 `json:"merchant_incentive_treasury_bps"`
+	MerchantIncentiveStakersPct  string `json:"merchant_incentive_stakers_pct"`
+	MerchantIncentiveTreasuryPct string `json:"merchant_incentive_treasury_pct"`
+}
+
 func (h *Handler) merchantRouting(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r.URL.Query().Get("limit"), 25, 100)
 	verifiedOnly := true
@@ -197,6 +234,45 @@ func (h *Handler) merchantRouting(w http.ResponseWriter, r *http.Request) {
 		"network":     h.cfg.Network,
 		"count":       len(tokens),
 		"items":       tokens,
+		"generated":   time.Now().UTC().Format(time.RFC3339),
+		"source_rest": h.cfg.RESTAddr,
+	})
+}
+
+func (h *Handler) merchantAllocations(w http.ResponseWriter, r *http.Request) {
+	limit := parseLimit(r.URL.Query().Get("limit"), 25, 200)
+	date := strings.TrimSpace(r.URL.Query().Get("date"))
+	if date != "" {
+		if _, err := time.Parse("2006-01-02", date); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"ok":     false,
+				"error":  "invalid_date",
+				"detail": "date must be YYYY-MM-DD",
+			})
+			return
+		}
+	}
+	denom := strings.TrimSpace(r.URL.Query().Get("denom"))
+
+	items, err := h.fetchMerchantAllocations(limit, date, denom)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok":     false,
+			"error":  "failed_to_fetch_merchant_allocations",
+			"rest":   h.cfg.RESTAddr,
+			"detail": err.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"chain_id":    h.cfg.ChainID,
+		"network":     h.cfg.Network,
+		"count":       len(items),
+		"date":        date,
+		"denom":       denom,
+		"items":       items,
 		"generated":   time.Now().UTC().Format(time.RFC3339),
 		"source_rest": h.cfg.RESTAddr,
 	})
@@ -263,6 +339,73 @@ func (h *Handler) fetchVerifiedTokens(limit int, verifiedOnly bool) ([]merchantR
 	return items, nil
 }
 
+func (h *Handler) fetchMerchantAllocations(limit int, date, denom string) ([]merchantAllocationItem, error) {
+	baseURL := strings.TrimRight(h.cfg.RESTAddr, "/") + "/tokenchain/loyalty/v1/merchantallocations/filter"
+	client := &http.Client{Timeout: 6 * time.Second}
+	nextKey := ""
+	items := make([]merchantAllocationItem, 0, limit)
+
+	for len(items) < limit {
+		u, err := url.Parse(baseURL)
+		if err != nil {
+			return nil, err
+		}
+
+		q := u.Query()
+		q.Set("pagination.limit", "100")
+		if nextKey != "" {
+			q.Set("pagination.key", nextKey)
+		}
+		if date != "" {
+			q.Set("date", date)
+		}
+		if denom != "" {
+			q.Set("denom", denom)
+		}
+		u.RawQuery = q.Encode()
+
+		req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		var out chainMerchantAllocationFilterResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&out)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("chain rest returned status %d", resp.StatusCode)
+		}
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+
+		for _, allocation := range out.Merchantallocation {
+			items = append(items, toMerchantAllocationItem(allocation))
+			if len(items) >= limit {
+				break
+			}
+		}
+
+		if out.Pagination.NextKey == "" {
+			break
+		}
+		nextKey = out.Pagination.NextKey
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Date == items[j].Date {
+			return items[i].Denom < items[j].Denom
+		}
+		return items[i].Date > items[j].Date
+	})
+
+	return items, nil
+}
+
 func toMerchantRoutingItem(t chainVerifiedToken) merchantRoutingItem {
 	stakers := parseBPS(t.MerchantIncentiveStakersBps)
 	treasury := parseBPS(t.MerchantIncentiveTreasuryBps)
@@ -287,16 +430,44 @@ func toMerchantRoutingItem(t chainVerifiedToken) merchantRoutingItem {
 	}
 }
 
+func toMerchantAllocationItem(a chainMerchantAllocation) merchantAllocationItem {
+	stakersBps := parseBPS(a.MerchantIncentiveStakersBps)
+	treasuryBps := parseBPS(a.MerchantIncentiveTreasuryBps)
+	if stakersBps == 0 && treasuryBps == 0 {
+		stakersBps = 5000
+		treasuryBps = 5000
+	}
+
+	return merchantAllocationItem{
+		Key:                          a.Key,
+		Date:                         a.Date,
+		Denom:                        a.Denom,
+		ActivityScore:                parseUint(a.ActivityScore),
+		BucketCAmount:                parseUint(a.BucketCAmount),
+		StakersAmount:                parseUint(a.StakersAmount),
+		TreasuryAmount:               parseUint(a.TreasuryAmount),
+		MerchantIncentiveStakersBps:  stakersBps,
+		MerchantIncentiveTreasuryBps: treasuryBps,
+		MerchantIncentiveStakersPct:  bpsToPercent(stakersBps),
+		MerchantIncentiveTreasuryPct: bpsToPercent(treasuryBps),
+	}
+}
+
 func bpsToPercent(v uint64) string {
 	return fmt.Sprintf("%.2f%%", float64(v)/100.0)
 }
 
 func parseBPS(raw string) uint64 {
-	n, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
-	if err != nil {
+	n := parseUint(raw)
+	if n > 10000 {
 		return 0
 	}
-	if n > 10000 {
+	return n
+}
+
+func parseUint(raw string) uint64 {
+	n, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
 		return 0
 	}
 	return n
@@ -320,6 +491,13 @@ type adminSetMerchantRoutingRequest struct {
 	Denom                        string `json:"denom"`
 	MerchantIncentiveStakersBps  uint64 `json:"merchant_incentive_stakers_bps"`
 	MerchantIncentiveTreasuryBps uint64 `json:"merchant_incentive_treasury_bps"`
+}
+
+type adminRecordMerchantAllocationRequest struct {
+	Date          string `json:"date"`
+	Denom         string `json:"denom"`
+	ActivityScore uint64 `json:"activity_score"`
+	BucketCAmount uint64 `json:"bucket_c_amount"`
 }
 
 type txSyncResponse struct {
@@ -399,6 +577,88 @@ func (h *Handler) adminSetMerchantRouting(w http.ResponseWriter, r *http.Request
 	})
 }
 
+func (h *Handler) adminRecordMerchantAllocation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method_not_allowed"})
+		return
+	}
+	if strings.TrimSpace(h.cfg.AdminAPIToken) == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "admin_api_disabled"})
+		return
+	}
+	if !h.isAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
+		return
+	}
+
+	var req adminRecordMerchantAllocationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_json"})
+		return
+	}
+	req.Date = strings.TrimSpace(req.Date)
+	req.Denom = strings.TrimSpace(req.Denom)
+	if req.Date == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "date_required"})
+		return
+	}
+	if _, err := time.Parse("2006-01-02", req.Date); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok":     false,
+			"error":  "invalid_date",
+			"detail": "date must be YYYY-MM-DD",
+		})
+		return
+	}
+	if req.Denom == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "denom_required"})
+		return
+	}
+	if req.ActivityScore == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "activity_score_required"})
+		return
+	}
+	if req.BucketCAmount == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bucket_c_amount_required"})
+		return
+	}
+
+	txResp, err := h.submitMerchantAllocationTx(r.Context(), req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok":     false,
+			"error":  "tx_submission_failed",
+			"detail": err.Error(),
+		})
+		return
+	}
+	if txResp.Code != 0 {
+		detail := strings.TrimSpace(txResp.RawLog)
+		if detail == "" {
+			detail = "chain rejected transaction"
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok":        false,
+			"error":     "tx_rejected",
+			"code":      txResp.Code,
+			"codespace": txResp.CodeSpa,
+			"tx_hash":   txResp.TxHash,
+			"detail":    detail,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":              true,
+		"tx_hash":         txResp.TxHash,
+		"height":          txResp.Height,
+		"date":            req.Date,
+		"denom":           req.Denom,
+		"activity_score":  req.ActivityScore,
+		"bucket_c_amount": req.BucketCAmount,
+	})
+}
+
 func (h *Handler) isAuthorized(r *http.Request) bool {
 	raw := strings.TrimSpace(r.Header.Get("Authorization"))
 	if !strings.HasPrefix(raw, "Bearer ") {
@@ -424,6 +684,24 @@ func (h *Handler) submitMerchantRoutingTx(ctx context.Context, req adminSetMerch
 		req.Denom,
 		strconv.FormatUint(req.MerchantIncentiveStakersBps, 10),
 		strconv.FormatUint(req.MerchantIncentiveTreasuryBps, 10),
+	}
+	return h.submitTx(ctx, args)
+}
+
+func (h *Handler) submitMerchantAllocationTx(ctx context.Context, req adminRecordMerchantAllocationRequest) (*txSyncResponse, error) {
+	args := []string{
+		"tx", "loyalty", "record-merchant-allocation",
+		req.Date,
+		req.Denom,
+		strconv.FormatUint(req.ActivityScore, 10),
+		strconv.FormatUint(req.BucketCAmount, 10),
+	}
+	return h.submitTx(ctx, args)
+}
+
+func (h *Handler) submitTx(ctx context.Context, txArgs []string) (*txSyncResponse, error) {
+	args := append([]string{}, txArgs...)
+	args = append(args,
 		"--from", h.cfg.AdminFromKey,
 		"--chain-id", h.cfg.ChainID,
 		"--node", h.cfg.RPCAddr,
@@ -434,7 +712,7 @@ func (h *Handler) submitMerchantRoutingTx(ctx context.Context, req adminSetMerch
 		"--fees", h.cfg.TxFees,
 		"--gas", h.cfg.TxGas,
 		"-o", "json",
-	}
+	)
 
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
