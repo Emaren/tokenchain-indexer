@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -33,6 +34,8 @@ func NewHandler(cfg config.Config) http.Handler {
 	mux.HandleFunc("/v1/endpoints", h.endpoints)
 	mux.HandleFunc("/v1/loyalty/merchant-routing", h.merchantRouting)
 	mux.HandleFunc("/v1/loyalty/merchant-allocations", h.merchantAllocations)
+	mux.HandleFunc("/v1/ibc/channels", h.ibcChannels)
+	mux.HandleFunc("/v1/ibc/relayer-status", h.relayerStatus)
 	mux.HandleFunc("/v1/admin/loyalty/merchant-routing", h.adminSetMerchantRouting)
 	mux.HandleFunc("/v1/admin/loyalty/merchant-allocation", h.adminRecordMerchantAllocation)
 	mux.HandleFunc("/v1/admin/loyalty/daily-allocation/run", h.adminRunDailyAllocation)
@@ -137,6 +140,8 @@ func (h *Handler) endpoints(w http.ResponseWriter, _ *http.Request) {
 			"status":                    "/v1/status",
 			"merchant_routing":          "/v1/loyalty/merchant-routing",
 			"merchant_allocations":      "/v1/loyalty/merchant-allocations",
+			"ibc_channels":              "/v1/ibc/channels",
+			"ibc_relayer_status":        "/v1/ibc/relayer-status",
 			"admin_merchant_routing":    "/v1/admin/loyalty/merchant-routing",
 			"admin_merchant_allocation": "/v1/admin/loyalty/merchant-allocation",
 			"admin_daily_allocation":    "/v1/admin/loyalty/daily-allocation/run",
@@ -213,6 +218,38 @@ type merchantAllocationItem struct {
 	MerchantIncentiveTreasuryPct string `json:"merchant_incentive_treasury_pct"`
 }
 
+type chainIBCChannel struct {
+	State          string   `json:"state"`
+	Ordering       string   `json:"ordering"`
+	ConnectionHops []string `json:"connection_hops"`
+	Version        string   `json:"version"`
+	PortID         string   `json:"port_id"`
+	ChannelID      string   `json:"channel_id"`
+	Counterparty   struct {
+		PortID    string `json:"port_id"`
+		ChannelID string `json:"channel_id"`
+	} `json:"counterparty"`
+}
+
+type chainIBCChannelsResponse struct {
+	Channels   []chainIBCChannel `json:"channels"`
+	Pagination struct {
+		NextKey string `json:"next_key"`
+		Total   string `json:"total"`
+	} `json:"pagination"`
+}
+
+type ibcChannelItem struct {
+	PortID                string `json:"port_id"`
+	ChannelID             string `json:"channel_id"`
+	State                 string `json:"state"`
+	Ordering              string `json:"ordering"`
+	CounterpartyPortID    string `json:"counterparty_port_id"`
+	CounterpartyChannelID string `json:"counterparty_channel_id"`
+	ConnectionID          string `json:"connection_id"`
+	Version               string `json:"version"`
+}
+
 func (h *Handler) merchantRouting(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(r.URL.Query().Get("limit"), 25, 100)
 	verifiedOnly := true
@@ -279,6 +316,94 @@ func (h *Handler) merchantAllocations(w http.ResponseWriter, r *http.Request) {
 		"generated":   time.Now().UTC().Format(time.RFC3339),
 		"source_rest": h.cfg.RESTAddr,
 	})
+}
+
+func (h *Handler) ibcChannels(w http.ResponseWriter, r *http.Request) {
+	limit := parseLimit(r.URL.Query().Get("limit"), 25, 200)
+	portID := strings.TrimSpace(r.URL.Query().Get("port_id"))
+
+	items, err := h.fetchIBCChannels(limit, portID)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok":     false,
+			"error":  "failed_to_fetch_ibc_channels",
+			"rest":   h.cfg.RESTAddr,
+			"detail": err.Error(),
+		})
+		return
+	}
+
+	openCount := 0
+	for _, item := range items {
+		if item.State == "OPEN" {
+			openCount++
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"chain_id":    h.cfg.ChainID,
+		"network":     h.cfg.Network,
+		"count":       len(items),
+		"open_count":  openCount,
+		"port_id":     portID,
+		"items":       items,
+		"generated":   time.Now().UTC().Format(time.RFC3339),
+		"source_rest": h.cfg.RESTAddr,
+	})
+}
+
+func (h *Handler) relayerStatus(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	resp := map[string]any{
+		"ok":              true,
+		"chain_id":        h.cfg.ChainID,
+		"network":         h.cfg.Network,
+		"relayer_service": h.cfg.RelayerService,
+		"hermes_binary":   h.cfg.HermesBinary,
+		"hermes_config":   h.cfg.HermesConfig,
+		"checked_at":      time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if active, err := commandOutput(ctx, "systemctl", "is-active", h.cfg.RelayerService); err != nil {
+		resp["service_active"] = "unknown"
+		resp["service_active_error"] = truncateText(err.Error(), 500)
+	} else {
+		resp["service_active"] = active
+	}
+
+	if enabled, err := commandOutput(ctx, "systemctl", "is-enabled", h.cfg.RelayerService); err != nil {
+		resp["service_enabled"] = "unknown"
+		resp["service_enabled_error"] = truncateText(err.Error(), 500)
+	} else {
+		resp["service_enabled"] = enabled
+	}
+
+	if _, err := os.Stat(h.cfg.HermesConfig); err != nil {
+		resp["hermes_config_exists"] = false
+		resp["hermes_health_ok"] = false
+		resp["hermes_health_error"] = truncateText(err.Error(), 500)
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	resp["hermes_config_exists"] = true
+
+	healthOut, err := commandOutput(ctx, h.cfg.HermesBinary, "--config", h.cfg.HermesConfig, "health-check", "--json")
+	if err != nil {
+		resp["hermes_health_ok"] = false
+		resp["hermes_health_error"] = truncateText(err.Error(), 1200)
+		if healthOut != "" {
+			resp["hermes_health_output"] = truncateText(healthOut, 4000)
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	resp["hermes_health_ok"] = true
+	resp["hermes_health_output"] = truncateText(healthOut, 4000)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handler) fetchVerifiedTokens(limit int, verifiedOnly bool) ([]merchantRoutingItem, error) {
@@ -409,6 +534,71 @@ func (h *Handler) fetchMerchantAllocations(limit int, date, denom string) ([]mer
 	return items, nil
 }
 
+func (h *Handler) fetchIBCChannels(limit int, portID string) ([]ibcChannelItem, error) {
+	baseURL := strings.TrimRight(h.cfg.RESTAddr, "/") + "/ibc/core/channel/v1/channels"
+	client := &http.Client{Timeout: 6 * time.Second}
+	nextKey := ""
+	items := make([]ibcChannelItem, 0, limit)
+
+	for len(items) < limit {
+		u, err := url.Parse(baseURL)
+		if err != nil {
+			return nil, err
+		}
+
+		q := u.Query()
+		q.Set("pagination.limit", "100")
+		if nextKey != "" {
+			q.Set("pagination.key", nextKey)
+		}
+		u.RawQuery = q.Encode()
+
+		req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		var out chainIBCChannelsResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&out)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("chain rest returned status %d", resp.StatusCode)
+		}
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+
+		for _, channel := range out.Channels {
+			item := toIBCChannelItem(channel)
+			if portID != "" && item.PortID != portID {
+				continue
+			}
+			items = append(items, item)
+			if len(items) >= limit {
+				break
+			}
+		}
+
+		if out.Pagination.NextKey == "" {
+			break
+		}
+		nextKey = out.Pagination.NextKey
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].PortID == items[j].PortID {
+			return items[i].ChannelID < items[j].ChannelID
+		}
+		return items[i].PortID < items[j].PortID
+	})
+
+	return items, nil
+}
+
 func (h *Handler) merchantAllocationExists(_ context.Context, date, denom string) (bool, error) {
 	items, err := h.fetchMerchantAllocations(1, date, denom)
 	if err != nil {
@@ -464,6 +654,24 @@ func toMerchantAllocationItem(a chainMerchantAllocation) merchantAllocationItem 
 	}
 }
 
+func toIBCChannelItem(c chainIBCChannel) ibcChannelItem {
+	connectionID := ""
+	if len(c.ConnectionHops) > 0 {
+		connectionID = c.ConnectionHops[0]
+	}
+
+	return ibcChannelItem{
+		PortID:                c.PortID,
+		ChannelID:             c.ChannelID,
+		State:                 normalizeEnumValue(c.State, "STATE_"),
+		Ordering:              normalizeEnumValue(c.Ordering, "ORDER_"),
+		CounterpartyPortID:    c.Counterparty.PortID,
+		CounterpartyChannelID: c.Counterparty.ChannelID,
+		ConnectionID:          connectionID,
+		Version:               c.Version,
+	}
+}
+
 func bpsToPercent(v uint64) string {
 	return fmt.Sprintf("%.2f%%", float64(v)/100.0)
 }
@@ -498,6 +706,23 @@ func parseLimit(raw string, fallback, max int) int {
 	return n
 }
 
+func normalizeEnumValue(raw, prefix string) string {
+	out := strings.TrimSpace(raw)
+	out = strings.TrimPrefix(out, prefix)
+	return strings.TrimSpace(out)
+}
+
+func truncateText(raw string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	out := strings.TrimSpace(raw)
+	if len(out) <= max {
+		return out
+	}
+	return out[:max]
+}
+
 func normalizeRunDate(raw string) (string, error) {
 	date := strings.TrimSpace(raw)
 	if date == "" {
@@ -511,6 +736,19 @@ func normalizeRunDate(raw string) (string, error) {
 		return "", err
 	}
 	return date, nil
+}
+
+func commandOutput(ctx context.Context, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	out, err := cmd.CombinedOutput()
+	trimmed := strings.TrimSpace(string(out))
+	if err != nil {
+		if trimmed == "" {
+			return "", err
+		}
+		return trimmed, fmt.Errorf("%w: %s", err, trimmed)
+	}
+	return trimmed, nil
 }
 
 func resolveAutoMinScore(v uint64) uint64 {

@@ -24,6 +24,9 @@ Environment variables:
 - `NETWORK` (default `testnet`)
 - `RPC_ADDR` (default `http://127.0.0.1:26657`)
 - `REST_ADDR` (default `http://127.0.0.1:1317`)
+- `RELAYER_SERVICE` (default `tokenchain-relayer.service`)
+- `HERMES_BIN` (default `/usr/local/bin/hermes`)
+- `HERMES_CONFIG` (default `/etc/tokenchain/hermes.toml`)
 - `ADMIN_API_TOKEN` (default empty/disabled)
 - `ADMIN_FROM_KEY` (default `founder`)
 - `CHAIN_HOME` (default `/var/lib/tokenchain-testnet`)
@@ -46,6 +49,8 @@ Faucet environment variables:
 - `GET /v1/status`
 - `GET /v1/loyalty/merchant-routing?limit=25&verified_only=true`
 - `GET /v1/loyalty/merchant-allocations?limit=25&date=YYYY-MM-DD&denom=factory/...`
+- `GET /v1/ibc/channels?limit=25&port_id=transfer`
+- `GET /v1/ibc/relayer-status`
 - `POST /v1/admin/loyalty/merchant-routing` (Bearer token auth; disabled unless `ADMIN_API_TOKEN` set)
 - `POST /v1/admin/loyalty/merchant-allocation` (Bearer token auth; disabled unless `ADMIN_API_TOKEN` set)
 - `POST /v1/admin/loyalty/daily-allocation/run` (Bearer token auth; runs deterministic multi-denom allocation batch)

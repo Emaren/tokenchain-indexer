@@ -9,6 +9,10 @@ type Config struct {
 	RPCAddr    string
 	RESTAddr   string
 
+	RelayerService string
+	HermesBinary   string
+	HermesConfig   string
+
 	AdminAPIToken string
 	AdminFromKey  string
 	ChainHome     string
@@ -25,6 +29,10 @@ func FromEnv() Config {
 		Network:    getenv("NETWORK", "testnet"),
 		RPCAddr:    getenv("RPC_ADDR", "http://127.0.0.1:26657"),
 		RESTAddr:   getenv("REST_ADDR", "http://127.0.0.1:1317"),
+
+		RelayerService: getenv("RELAYER_SERVICE", "tokenchain-relayer.service"),
+		HermesBinary:   getenv("HERMES_BIN", "/usr/local/bin/hermes"),
+		HermesConfig:   getenv("HERMES_CONFIG", "/etc/tokenchain/hermes.toml"),
 
 		AdminAPIToken: getenv("ADMIN_API_TOKEN", ""),
 		AdminFromKey:  getenv("ADMIN_FROM_KEY", "founder"),
