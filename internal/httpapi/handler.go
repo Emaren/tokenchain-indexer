@@ -1,11 +1,15 @@
 package httpapi
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +31,7 @@ func NewHandler(cfg config.Config) http.Handler {
 	mux.HandleFunc("/v1/status", h.status)
 	mux.HandleFunc("/v1/endpoints", h.endpoints)
 	mux.HandleFunc("/v1/loyalty/merchant-routing", h.merchantRouting)
+	mux.HandleFunc("/v1/admin/loyalty/merchant-routing", h.adminSetMerchantRouting)
 	mux.HandleFunc("/v1/version", h.ver)
 	return mux
 }
@@ -127,6 +132,7 @@ func (h *Handler) endpoints(w http.ResponseWriter, _ *http.Request) {
 			"network":                  "/v1/network",
 			"status":                   "/v1/status",
 			"merchant_routing":         "/v1/loyalty/merchant-routing",
+			"admin_merchant_routing":   "/v1/admin/loyalty/merchant-routing",
 			"version":                  "/v1/version",
 			"faucet":                   "see tokenchain-faucet service",
 			"openapi":                  "n/a",
@@ -308,6 +314,140 @@ func parseLimit(raw string, fallback, max int) int {
 		return max
 	}
 	return n
+}
+
+type adminSetMerchantRoutingRequest struct {
+	Denom                        string `json:"denom"`
+	MerchantIncentiveStakersBps  uint64 `json:"merchant_incentive_stakers_bps"`
+	MerchantIncentiveTreasuryBps uint64 `json:"merchant_incentive_treasury_bps"`
+}
+
+type txSyncResponse struct {
+	Code    uint32 `json:"code"`
+	TxHash  string `json:"txhash"`
+	RawLog  string `json:"raw_log"`
+	Info    string `json:"info"`
+	Height  string `json:"height"`
+	CodeSpa string `json:"codespace"`
+}
+
+func (h *Handler) adminSetMerchantRouting(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method_not_allowed"})
+		return
+	}
+	if strings.TrimSpace(h.cfg.AdminAPIToken) == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "admin_api_disabled"})
+		return
+	}
+	if !h.isAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
+		return
+	}
+
+	var req adminSetMerchantRoutingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_json"})
+		return
+	}
+	req.Denom = strings.TrimSpace(req.Denom)
+	if req.Denom == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "denom_required"})
+		return
+	}
+	if req.MerchantIncentiveStakersBps+req.MerchantIncentiveTreasuryBps != 10000 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok":     false,
+			"error":  "invalid_routing_split",
+			"detail": "merchant incentive bps must total 10000",
+		})
+		return
+	}
+
+	txResp, err := h.submitMerchantRoutingTx(r.Context(), req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok":     false,
+			"error":  "tx_submission_failed",
+			"detail": err.Error(),
+		})
+		return
+	}
+	if txResp.Code != 0 {
+		detail := strings.TrimSpace(txResp.RawLog)
+		if detail == "" {
+			detail = "chain rejected transaction"
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok":        false,
+			"error":     "tx_rejected",
+			"code":      txResp.Code,
+			"codespace": txResp.CodeSpa,
+			"tx_hash":   txResp.TxHash,
+			"detail":    detail,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                              true,
+		"tx_hash":                         txResp.TxHash,
+		"height":                          txResp.Height,
+		"denom":                           req.Denom,
+		"merchant_incentive_stakers_bps":  req.MerchantIncentiveStakersBps,
+		"merchant_incentive_treasury_bps": req.MerchantIncentiveTreasuryBps,
+	})
+}
+
+func (h *Handler) isAuthorized(r *http.Request) bool {
+	raw := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(raw, "Bearer ") {
+		return false
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(raw, "Bearer "))
+	if token == "" {
+		return false
+	}
+	expected := strings.TrimSpace(h.cfg.AdminAPIToken)
+	if expected == "" {
+		return false
+	}
+	if len(token) != len(expected) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
+}
+
+func (h *Handler) submitMerchantRoutingTx(ctx context.Context, req adminSetMerchantRoutingRequest) (*txSyncResponse, error) {
+	cmd := exec.CommandContext(
+		ctx,
+		h.cfg.Tokenchaind,
+		"tx", "loyalty", "set-merchant-incentive-routing",
+		req.Denom,
+		strconv.FormatUint(req.MerchantIncentiveStakersBps, 10),
+		strconv.FormatUint(req.MerchantIncentiveTreasuryBps, 10),
+		"--from", h.cfg.AdminFromKey,
+		"--chain-id", h.cfg.ChainID,
+		"--node", h.cfg.RPCAddr,
+		"--home", h.cfg.ChainHome,
+		"--keyring-backend", h.cfg.Keyring,
+		"--yes",
+		"--broadcast-mode", "sync",
+		"--fees", h.cfg.TxFees,
+		"--gas", h.cfg.TxGas,
+		"-o", "json",
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, errors.New(strings.TrimSpace(string(out)))
+	}
+
+	var resp txSyncResponse
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return nil, errors.New("could not decode tx response")
+	}
+	return &resp, nil
 }
 
 func (h *Handler) ver(w http.ResponseWriter, _ *http.Request) {

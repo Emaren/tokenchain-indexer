@@ -8,6 +8,14 @@ type Config struct {
 	Network    string
 	RPCAddr    string
 	RESTAddr   string
+
+	AdminAPIToken string
+	AdminFromKey  string
+	ChainHome     string
+	Keyring       string
+	TxFees        string
+	TxGas         string
+	Tokenchaind   string
 }
 
 func FromEnv() Config {
@@ -17,6 +25,14 @@ func FromEnv() Config {
 		Network:    getenv("NETWORK", "testnet"),
 		RPCAddr:    getenv("RPC_ADDR", "http://127.0.0.1:26657"),
 		RESTAddr:   getenv("REST_ADDR", "http://127.0.0.1:1317"),
+
+		AdminAPIToken: getenv("ADMIN_API_TOKEN", ""),
+		AdminFromKey:  getenv("ADMIN_FROM_KEY", "founder"),
+		ChainHome:     getenv("CHAIN_HOME", "/var/lib/tokenchain-testnet"),
+		Keyring:       getenv("KEYRING_BACKEND", "test"),
+		TxFees:        getenv("TX_FEES", "5000utoken"),
+		TxGas:         getenv("TX_GAS", "200000"),
+		Tokenchaind:   getenv("TOKENCHAIND_BIN", "/usr/local/bin/tokenchaind"),
 	}
 }
 

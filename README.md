@@ -24,6 +24,13 @@ Environment variables:
 - `NETWORK` (default `testnet`)
 - `RPC_ADDR` (default `http://127.0.0.1:26657`)
 - `REST_ADDR` (default `http://127.0.0.1:1317`)
+- `ADMIN_API_TOKEN` (default empty/disabled)
+- `ADMIN_FROM_KEY` (default `founder`)
+- `CHAIN_HOME` (default `/var/lib/tokenchain-testnet`)
+- `KEYRING_BACKEND` (default `test`)
+- `TX_FEES` (default `5000utoken`)
+- `TX_GAS` (default `200000`)
+- `TOKENCHAIND_BIN` (default `/usr/local/bin/tokenchaind`)
 
 Faucet environment variables:
 - `FAUCET_ENABLED` (default `true`)
@@ -38,6 +45,7 @@ Faucet environment variables:
 - `GET /v1/network`
 - `GET /v1/status`
 - `GET /v1/loyalty/merchant-routing?limit=25&verified_only=true`
+- `POST /v1/admin/loyalty/merchant-routing` (Bearer token auth; disabled unless `ADMIN_API_TOKEN` set)
 - `GET /v1/endpoints`
 - `GET /v1/version`
 
