@@ -1,0 +1,17 @@
+[Unit]
+Description=TokenChain Indexer API
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/tokenchain-indexer
+ExecStart=/opt/tokenchain-indexer/tokenchain-indexer
+Restart=always
+RestartSec=2
+Environment=LISTEN_ADDR=127.0.0.1:3321
+Environment=CHAIN_ID=tokenchain-testnet-1
+Environment=NETWORK=testnet
+
+[Install]
+WantedBy=multi-user.target
