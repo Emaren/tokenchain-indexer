@@ -367,18 +367,24 @@ func (h *Handler) relayerStatus(w http.ResponseWriter, r *http.Request) {
 		"checked_at":      time.Now().UTC().Format(time.RFC3339),
 	}
 
-	if active, err := commandOutput(ctx, "systemctl", "is-active", h.cfg.RelayerService); err != nil {
+	activeOut, activeErr := commandOutput(ctx, "systemctl", "is-active", h.cfg.RelayerService)
+	if activeOut == "" {
 		resp["service_active"] = "unknown"
-		resp["service_active_error"] = truncateText(err.Error(), 500)
 	} else {
-		resp["service_active"] = active
+		resp["service_active"] = activeOut
+	}
+	if activeErr != nil {
+		resp["service_active_error"] = truncateText(activeErr.Error(), 500)
 	}
 
-	if enabled, err := commandOutput(ctx, "systemctl", "is-enabled", h.cfg.RelayerService); err != nil {
+	enabledOut, enabledErr := commandOutput(ctx, "systemctl", "is-enabled", h.cfg.RelayerService)
+	if enabledOut == "" {
 		resp["service_enabled"] = "unknown"
-		resp["service_enabled_error"] = truncateText(err.Error(), 500)
 	} else {
-		resp["service_enabled"] = enabled
+		resp["service_enabled"] = enabledOut
+	}
+	if enabledErr != nil {
+		resp["service_enabled_error"] = truncateText(enabledErr.Error(), 500)
 	}
 
 	if _, err := os.Stat(h.cfg.HermesConfig); err != nil {
@@ -390,7 +396,7 @@ func (h *Handler) relayerStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	resp["hermes_config_exists"] = true
 
-	healthOut, err := commandOutput(ctx, h.cfg.HermesBinary, "--config", h.cfg.HermesConfig, "health-check", "--json")
+	healthOut, err := commandOutput(ctx, h.cfg.HermesBinary, "--json", "--config", h.cfg.HermesConfig, "health-check")
 	if err != nil {
 		resp["hermes_health_ok"] = false
 		resp["hermes_health_error"] = truncateText(err.Error(), 1200)
