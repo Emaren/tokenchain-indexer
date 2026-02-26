@@ -13,6 +13,7 @@ Restart=always
 RestartSec=2
 Environment=LISTEN_ADDR=127.0.0.1:3322
 Environment=FAUCET_ENABLED=true
+Environment=STATE_FILE=/var/lib/tokenchain-testnet/faucet-state.json
 Environment=CHAIN_ID=tokenchain-testnet-1
 Environment=NODE_RPC=http://127.0.0.1:26657
 Environment=CHAIN_HOME=/var/lib/tokenchain-testnet

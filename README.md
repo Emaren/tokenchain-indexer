@@ -24,6 +24,14 @@ Environment variables:
 - `NETWORK` (default `testnet`)
 - `RPC_ADDR` (default `http://127.0.0.1:26657`)
 
+Faucet environment variables:
+- `FAUCET_ENABLED` (default `true`)
+- `STATE_FILE` (default `/var/lib/tokenchain-testnet/faucet-state.json`)
+- `NODE_RPC` (default `http://127.0.0.1:26657`)
+- `CHAIN_HOME`, `KEYRING_BACKEND`, `FROM_KEY`
+- `DENOM`, `DISPENSE_AMOUNT`, `TX_FEES`
+- `ADDRESS_COOLDOWN_MINUTES`, `IP_COOLDOWN_MINUTES`, `MAX_REQUESTS_PER_DAY`
+
 ## Initial endpoints
 - `GET /healthz`
 - `GET /v1/network`

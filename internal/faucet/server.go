@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -24,13 +27,24 @@ type Server struct {
 	dailyCount map[string]int
 }
 
+type persistedState struct {
+	NextByAddr map[string]int64 `json:"next_by_addr"`
+	NextByIP   map[string]int64 `json:"next_by_ip"`
+	DailyCount map[string]int   `json:"daily_count"`
+	UpdatedAt  int64            `json:"updated_at"`
+}
+
 func NewServer(cfg Config) *Server {
-	return &Server{
+	s := &Server{
 		cfg:        cfg,
 		nextByAddr: make(map[string]time.Time),
 		nextByIP:   make(map[string]time.Time),
 		dailyCount: make(map[string]int),
 	}
+	if err := s.loadState(); err != nil {
+		log.Printf("faucet state load warning: %v", err)
+	}
+	return s
 }
 
 func (s *Server) Handler() http.Handler {
@@ -55,6 +69,12 @@ func (s *Server) withCORS(next http.Handler) http.Handler {
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	addrEntries := len(s.nextByAddr)
+	ipEntries := len(s.nextByIP)
+	dailyEntries := len(s.dailyCount)
+	s.mu.Unlock()
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                   true,
 		"enabled":              s.cfg.Enabled,
@@ -62,6 +82,12 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 		"denom":                s.cfg.Denom,
 		"dispense_amount":      s.cfg.DispenseAmount,
 		"max_requests_per_day": s.cfg.MaxPerDay,
+		"state_file":           s.cfg.StateFile,
+		"state_entries": map[string]int{
+			"address_cooldowns": addrEntries,
+			"ip_cooldowns":      ipEntries,
+			"daily_counts":      dailyEntries,
+		},
 	})
 }
 
@@ -107,6 +133,7 @@ func (s *Server) request(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneStateLocked(now)
 
 	if retryAt, ok := s.nextByAddr[address]; ok && now.Before(retryAt) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{
@@ -142,6 +169,9 @@ func (s *Server) request(w http.ResponseWriter, r *http.Request) {
 	s.nextByAddr[address] = now.Add(s.cfg.AddressCooldown)
 	s.nextByIP[clientIP] = now.Add(s.cfg.IPCooldown)
 	s.dailyCount[dailyKey]++
+	if err := s.saveStateLocked(); err != nil {
+		log.Printf("faucet state save warning: %v", err)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":             true,
@@ -235,4 +265,92 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (s *Server) loadState() error {
+	bz, err := os.ReadFile(s.cfg.StateFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+
+	var p persistedState
+	if err := json.Unmarshal(bz, &p); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, v := range p.NextByAddr {
+		s.nextByAddr[k] = time.Unix(v, 0).UTC()
+	}
+	for k, v := range p.NextByIP {
+		s.nextByIP[k] = time.Unix(v, 0).UTC()
+	}
+	for k, v := range p.DailyCount {
+		s.dailyCount[k] = v
+	}
+	s.pruneStateLocked(time.Now().UTC())
+	return nil
+}
+
+func (s *Server) saveStateLocked() error {
+	p := persistedState{
+		NextByAddr: make(map[string]int64, len(s.nextByAddr)),
+		NextByIP:   make(map[string]int64, len(s.nextByIP)),
+		DailyCount: make(map[string]int, len(s.dailyCount)),
+		UpdatedAt:  time.Now().UTC().Unix(),
+	}
+	for k, v := range s.nextByAddr {
+		p.NextByAddr[k] = v.UTC().Unix()
+	}
+	for k, v := range s.nextByIP {
+		p.NextByIP[k] = v.UTC().Unix()
+	}
+	for k, v := range s.dailyCount {
+		p.DailyCount[k] = v
+	}
+
+	bz, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(s.cfg.StateFile)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	tmp := s.cfg.StateFile + ".tmp"
+	if err := os.WriteFile(tmp, bz, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.cfg.StateFile)
+}
+
+func (s *Server) pruneStateLocked(now time.Time) {
+	for addr, t := range s.nextByAddr {
+		if !now.Before(t) {
+			delete(s.nextByAddr, addr)
+		}
+	}
+	for ip, t := range s.nextByIP {
+		if !now.Before(t) {
+			delete(s.nextByIP, ip)
+		}
+	}
+
+	today := now.Format("2006-01-02")
+	for key := range s.dailyCount {
+		parts := strings.Split(key, "|")
+		if len(parts) != 2 {
+			delete(s.dailyCount, key)
+			continue
+		}
+		if parts[1] != today {
+			delete(s.dailyCount, key)
+		}
+	}
 }

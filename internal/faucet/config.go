@@ -9,6 +9,7 @@ import (
 type Config struct {
 	ListenAddr string
 	Enabled    bool
+	StateFile  string
 
 	ChainID        string
 	NodeRPC        string
@@ -30,6 +31,7 @@ func FromEnv() Config {
 	return Config{
 		ListenAddr:      getenv("LISTEN_ADDR", ":3322"),
 		Enabled:         getenvBool("FAUCET_ENABLED", true),
+		StateFile:       getenv("STATE_FILE", "/var/lib/tokenchain-testnet/faucet-state.json"),
 		ChainID:         getenv("CHAIN_ID", "tokenchain-testnet-1"),
 		NodeRPC:         getenv("NODE_RPC", "http://127.0.0.1:26657"),
 		Home:            getenv("CHAIN_HOME", "/var/lib/tokenchain-testnet"),
