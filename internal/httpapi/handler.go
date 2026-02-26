@@ -419,9 +419,7 @@ func (h *Handler) isAuthorized(r *http.Request) bool {
 }
 
 func (h *Handler) submitMerchantRoutingTx(ctx context.Context, req adminSetMerchantRoutingRequest) (*txSyncResponse, error) {
-	cmd := exec.CommandContext(
-		ctx,
-		h.cfg.Tokenchaind,
+	args := []string{
 		"tx", "loyalty", "set-merchant-incentive-routing",
 		req.Denom,
 		strconv.FormatUint(req.MerchantIncentiveStakersBps, 10),
@@ -436,18 +434,39 @@ func (h *Handler) submitMerchantRoutingTx(ctx context.Context, req adminSetMerch
 		"--fees", h.cfg.TxFees,
 		"--gas", h.cfg.TxGas,
 		"-o", "json",
-	)
-
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, errors.New(strings.TrimSpace(string(out)))
 	}
 
-	var resp txSyncResponse
-	if err := json.Unmarshal(out, &resp); err != nil {
-		return nil, errors.New("could not decode tx response")
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		cmd := exec.CommandContext(ctx, h.cfg.Tokenchaind, args...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			msg := strings.TrimSpace(string(out))
+			lastErr = errors.New(msg)
+			if strings.Contains(msg, "account sequence mismatch") && attempt < 2 {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			return nil, lastErr
+		}
+
+		var resp txSyncResponse
+		if err := json.Unmarshal(out, &resp); err != nil {
+			return nil, errors.New("could not decode tx response")
+		}
+
+		// Handle chain-level sequence mismatch returned in JSON with non-zero code.
+		if resp.Code != 0 && strings.Contains(resp.RawLog, "account sequence mismatch") && attempt < 2 {
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		return &resp, nil
 	}
-	return &resp, nil
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errors.New("failed to submit transaction")
 }
 
 func (h *Handler) ver(w http.ResponseWriter, _ *http.Request) {
